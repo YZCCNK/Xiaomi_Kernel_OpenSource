@@ -1,0 +1,156 @@
+name: Generate Kernel Module.symvers
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  generate-symvers:
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libssl-dev \
+          bc \
+          flex \
+          bison \
+          libelf-dev \
+          libncurses-dev \
+          gcc-aarch64-linux-gnu \
+          git \
+          wget \
+          kmod \
+          cpio
+        
+    - name: Clone Xiaomi kernel source
+      run: |
+        git clone --depth=1 https://github.com/MiCode/Xiaomi_Kernel_OpenSource -b camellia-r-oss kernel-source
+      
+    - name: Setup environment and generate Module.symvers
+      run: |
+        cd kernel-source
+        
+        # 设置环境变量
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export PATH=/usr/bin:$PATH
+        
+        # 清理可能的旧配置
+        make clean 2>/dev/null || true
+        make mrproper 2>/dev/null || true
+        
+        # 生成默认配置
+        echo "=== 生成defconfig ==="
+        make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE camellia_defconfig
+        
+        # 确保模块支持已启用
+        echo "=== 配置模块支持 ==="
+        echo "CONFIG_MODULES=y" >> .config
+        echo "CONFIG_MODULE_UNLOAD=y" >> .config
+        echo "CONFIG_MODVERSIONS=y" >> .config
+        echo "CONFIG_MODULE_SIG=n" >> .config
+        echo "CONFIG_MODULE_SIG_ALL=n" >> .config
+        
+        # 更新配置
+        make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE olddefconfig
+        
+        # 准备内核头文件
+        echo "=== 准备内核头文件 ==="
+        make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE modules_prepare
+        
+        # 创建测试模块目录
+        echo "=== 创建测试模块 ==="
+        mkdir -p test_dummy_module
+        
+        # 创建测试模块的Makefile
+        cat > test_dummy_module/Makefile << 'EOF'
+# SPDX-License-Identifier: GPL-2.0
+obj-m := dummy.o
+EOF
+        
+        # 创建测试模块的C源文件
+        cat > test_dummy_module/dummy.c << 'EOF'
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/init.h>
+
+static int __init dummy_init(void)
+{
+    printk(KERN_INFO "Dummy module loaded\n");
+    return 0;
+}
+
+static void __exit dummy_exit(void)
+{
+    printk(KERN_INFO "Dummy module unloaded\n");
+}
+
+module_init(dummy_init);
+module_exit(dummy_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("GitHub Actions");
+MODULE_DESCRIPTION("A dummy module to generate Module.symvers");
+MODULE_VERSION("1.0");
+EOF
+        
+        # 编译测试模块 - 这将生成Module.symvers
+        echo "=== 编译测试模块 ==="
+        make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE M=test_dummy_module modules
+        
+        # 验证Module.symvers是否生成
+        echo "=== 检查生成的文件 ==="
+        if [ -f Module.symvers ]; then
+            echo "✓ Module.symvers 生成成功"
+            echo "文件大小: $(wc -l < Module.symvers) 行"
+            head -5 Module.symvers
+        else
+            echo "✗ Module.symvers 未生成"
+            ls -la
+        fi
+        
+    - name: List kernel directory contents
+      run: |
+        echo "=== 内核目录内容 ==="
+        ls -la kernel-source/
+        echo ""
+        echo "=== 查找Module.symvers ==="
+        find kernel-source -name "Module.symvers" -type f
+        
+    - name: Upload Module.symvers artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Module.symvers-camellia-r-oss
+        path: kernel-source/Module.symvers
+        if-no-files-found: error
+        
+    - name: Upload kernel config
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-config
+        path: kernel-source/.config
+        
+    - name: Display success message
+      if: success()
+      run: |
+        echo "✅ Module.symvers 生成完成！"
+        echo "文件已保存为 artifact: Module.symvers-camellia-r-oss"
+        
+    - name: Display failure message
+      if: failure()
+      run: |
+        echo "❌ 生成 Module.symvers 失败"
+        echo "可能的原因："
+        echo "1. 交叉编译工具链未正确安装"
+        echo "2. 内核配置有问题"
+        echo "3. 缺少依赖项"
