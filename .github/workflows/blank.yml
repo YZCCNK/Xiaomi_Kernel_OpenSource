@@ -1,0 +1,47 @@
+name: Kernel modules_prepare with AOSP toolchains
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc bison flex \
+            libssl-dev libncurses5-dev libelf-dev git
+
+      - name: Clone kernel and toolchains
+        run: |
+          # 克隆内核源码
+          git clone --depth=1 https://github.com/MiCode/Xiaomi_Kernel_OpenSource -b camellia-r-oss kernel
+          
+          # 克隆 AOSP 工具链
+          mkdir -p kernel/toolchains
+          cd kernel/toolchains
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 clang
+
+      - name: Setup and build
+        run: |
+          cd kernel
+          
+          # 设置环境变量
+          export ARCH=arm64
+          export CROSS_COMPILE=$(pwd)/toolchains/aarch64-linux-android-4.9/bin/aarch64-linux-android-
+          export CC=$(pwd)/toolchains/clang/bin/clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export PATH="$(pwd)/toolchains/clang/bin:$PATH"
+          
+          # 配置和构建
+          make camellia_defconfig
+          make -j$(nproc) modules_prepare
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-modules-files
+          path: kernel/Module.symvers
