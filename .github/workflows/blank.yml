@@ -1,0 +1,147 @@
+name: Build Kernel and Headers
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. 克隆 camellia-r-oss 分支的内核源码
+      - name: Clone Xiaomi Kernel Source
+        run: |
+          git clone --depth=1 \
+            --branch=camellia-r-oss \
+            https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git \
+            kernel-source
+
+      # 2. 安装编译所需的依赖
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libncurses-dev \
+            flex \
+            bison \
+            libssl-dev \
+            libelf-dev \
+            bc \
+            rsync \
+            cpio \
+            gcc-aarch64-linux-gnu
+
+      # 3. 设置编译环境并编译内核头文件
+      - name: Build Kernel Headers
+        run: |
+          cd kernel-source
+          
+          # 设置架构和交叉编译器
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          
+          # 尝试不同的配置方法
+          # 方法1: 查找可用的defconfig配置
+          echo "查找可用的defconfig配置..."
+          find . -name "*defconfig" -type f | head -10
+          
+          # 方法2: 尝试使用特定设备的defconfig（根据小米设备调整）
+          # 你可以尝试以下可能的配置：
+          # make camellia_defconfig  # 如果设备代号是camellia
+          # make vendor/camellia_defconfig
+          # make sdm660_defconfig  # 如果是骁龙660平台
+          
+          # 方法3: 使用generic defconfig作为备用方案
+          if make help | grep -q "defconfig"; then
+            # 如果显示了defconfig目标，尝试生成一个最小配置
+            make defconfig
+          else
+            # 手动创建一个最小配置
+            make ARCH=arm64 defconfig
+          fi
+          
+          # 创建输出目录
+          mkdir -p $HOME/kernel_output/headers
+          
+          # 清理之前的构建
+          make mrproper 2>/dev/null || true
+          
+          # 再次应用配置
+          make defconfig
+          
+          # 尝试不同的headers安装方法
+          echo "尝试安装内核头文件..."
+          
+          # 方法A: 直接复制include目录
+          if [ -d "include" ]; then
+            echo "复制include目录..."
+            cp -r include $HOME/kernel_output/headers/
+          fi
+          
+          # 方法B: 查找并复制架构特定的头文件
+          if [ -d "arch/arm64/include" ]; then
+            echo "复制arch/arm64/include目录..."
+            mkdir -p $HOME/kernel_output/headers/arch/arm64
+            cp -r arch/arm64/include $HOME/kernel_output/headers/arch/arm64/
+          fi
+          
+          # 方法C: 尝试生成headers_install（使用绝对路径）
+          echo "尝试make headers_install..."
+          make headers_install INSTALL_HDR_PATH=$HOME/kernel_output/headers/usr 2>&1 | tail -20 || true
+          
+          # 方法D: 如果上面的方法失败，手动创建基本头文件结构
+          if [ ! -d "$HOME/kernel_output/headers/usr/include" ]; then
+            echo "手动创建头文件结构..."
+            mkdir -p $HOME/kernel_output/headers/usr/include
+            # 复制一些基本的头文件
+            if [ -d "include/uapi" ]; then
+              cp -r include/uapi/* $HOME/kernel_output/headers/usr/include/ 2>/dev/null || true
+            fi
+            if [ -d "include/linux" ]; then
+              mkdir -p $HOME/kernel_output/headers/usr/include/linux
+              cp include/linux/*.h $HOME/kernel_output/headers/usr/include/linux/ 2>/dev/null || true
+            fi
+          fi
+
+      # 4. 检查并打包生成的头文件
+      - name: Package Headers
+        run: |
+          cd $HOME/kernel_output
+          
+          # 检查是否生成了头文件
+          echo "检查生成的头文件..."
+          find . -name "*.h" -type f | head -10
+          du -sh headers/ || true
+          
+          # 确保目录不为空
+          if [ -d "headers" ] && [ "$(ls -A headers 2>/dev/null)" ]; then
+            echo "打包头文件..."
+            tar -czf kernel-headers-camellia-r-oss.tar.gz -C headers .
+            echo "打包完成，文件大小: $(du -h kernel-headers-camellia-r-oss.tar.gz | cut -f1)"
+          else
+            echo "错误：headers目录为空或不存在"
+            # 创建一个错误标记文件
+            echo "HEADER_GENERATION_FAILED" > build_error.txt
+            exit 1
+          fi
+
+      # 5. 将打包好的头文件上传为工作流制品
+      - name: Upload Headers Artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-headers-package
+          path: $HOME/kernel_output/kernel-headers-camellia-r-oss.tar.gz
+
+      # 6. 如果失败，上传诊断信息
+      - name: Upload Diagnostics on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: |
+            $HOME/kernel_output/build_error.txt
+            kernel-source/.config
+            kernel-source/Makefile
