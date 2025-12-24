@@ -1,0 +1,70 @@
+name: Build Kernel Headers
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. 克隆指定分支
+      - name: Clone camellia-r-oss
+        run: |
+          git clone --depth=1 \
+            --branch=camellia-r-oss \
+            https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git \
+            kernel-source
+          cd kernel-source
+          echo "源码克隆完成"
+
+      # 2. 安装必需依赖
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            build-essential \
+            libssl-dev \
+            bc \
+            rsync \
+            cpio \
+            gcc-aarch64-linux-gnu
+          echo "依赖安装完成"
+
+      # 3. 准备内核构建环境（核心步骤）
+      - name: Prepare kernel build
+        run: |
+          cd kernel-source
+          
+          # 设置编译环境
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          
+          # 使用默认配置，编译前步骤
+          make defconfig 2>&1 | tee config.log
+          make prepare scripts 2>&1 | tee prepare.log
+          
+          echo "内核准备完成"
+
+      # 4. 打包头文件
+      - name: Package headers
+        run: |
+          cd kernel-source
+          mkdir -p ../kernel-headers-output
+          
+          # 复制头文件和相关构建文件
+          cp -rf usr/include ../kernel-headers-output/
+          cp -rf include ../kernel-headers-output/
+          cp -rf arch/arm64/include ../kernel-headers-output/arch-arm64-include
+          cp .config ../kernel-headers-output/
+          cp Module.symvers ../kernel-headers-output/ 2>/dev/null || true
+          
+          # 创建压缩包
+          cd ../kernel-headers-output
+          tar -czf ../camellia-r-oss-headers.tar.gz .
+          echo "打包完成，文件大小: $(du -h ../camellia-r-oss-headers.tar.gz | cut -f1)"
+
+      # 5. 上传头文件包
+      - name: Upload headers
+        uses: actions/upload-artifact@v4
+        with:
+          name: camellia-r-oss-kernel-headers
+          path: camellia-r-oss-headers.tar.gz
+          
